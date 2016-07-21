@@ -113,8 +113,8 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
         //this is only safe because we use a dispatch_semaphore as a lock. If we switch to an NSLock or posix locks, this will *no longer be safe*.
         [self lock];
         dispatch_async(_asyncQueue, ^{
-            [self createCacheDirectory];
-            [self initializeDiskProperties];
+            [self _locked_createCacheDirectory];
+            [self _locked_initializeDiskProperties];
 
             [self unlock];
         });
@@ -276,7 +276,7 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
 
 #pragma mark - Private Queue Methods -
 
-- (BOOL)createCacheDirectory
+- (BOOL)_locked_createCacheDirectory
 {
     if ([[NSFileManager defaultManager] fileExistsAtPath:[_cacheURL path]])
         return NO;
@@ -291,7 +291,7 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
     return success;
 }
 
-- (void)initializeDiskProperties
+- (void)_locked_initializeDiskProperties
 {
     NSUInteger byteCount = 0;
     NSArray *keys = @[ NSURLContentModificationDateKey, NSURLTotalFileAllocatedSizeKey ];
@@ -325,7 +325,7 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
         self.byteCount = byteCount; // atomic
 }
 
-- (BOOL)setFileModificationDate:(NSDate *)date forURL:(NSURL *)fileURL
+- (BOOL)_locked_setFileModificationDate:(NSDate *)date forURL:(NSURL *)fileURL
 {
     if (!date || !fileURL) {
         return NO;
@@ -689,7 +689,7 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
                 PINDiskCacheError(error);
             }
           if (!self->_ttlCache) {
-            [self setFileModificationDate:now forURL:fileURL];
+            [self _locked_setFileModificationDate:now forURL:fileURL];
           }
         }
     [self unlock];
@@ -722,7 +722,7 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
         
         if ([[NSFileManager defaultManager] fileExistsAtPath:[fileURL path]]) {
             if (updateFileModificationDate) {
-                [self setFileModificationDate:now forURL:fileURL];
+                [self _locked_setFileModificationDate:now forURL:fileURL];
             }
         } else {
             fileURL = nil;
@@ -760,9 +760,13 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
     
     [self lock];
         fileURL = [self _locked_encodedFileURLForKey:key];
-        
-        if (self->_willAddObjectBlock)
-            self->_willAddObjectBlock(self, key, object);
+    
+        PINDiskCacheObjectBlock willAddObjectBlock = self->_willAddObjectBlock;
+        if (willAddObjectBlock) {
+            [self unlock];
+            willAddObjectBlock(self, key, object);
+            [self lock];
+        }
   
         NSData *data = [NSKeyedArchiver archivedDataWithRootObject:object];
         NSError *writeError = nil;
@@ -771,7 +775,7 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
         PINDiskCacheError(writeError);
         
         if (written) {
-            [self setFileModificationDate:now forURL:fileURL];
+            [self _locked_setFileModificationDate:now forURL:fileURL];
             
             NSError *error = nil;
             NSDictionary *values = [fileURL resourceValuesForKeys:@[ NSURLTotalFileAllocatedSizeKey ] error:&error];
@@ -792,9 +796,13 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
         } else {
             fileURL = nil;
         }
-        
-        if (self->_didAddObjectBlock)
-            self->_didAddObjectBlock(self, key, object);
+    
+        PINDiskCacheObjectBlock didAddObjectBlock = self->_didAddObjectBlock;
+        if (didAddObjectBlock) {
+            [self unlock];
+            didAddObjectBlock(self, key, object);
+            [self lock];
+        }
     [self unlock];
     
     if (outFileURL) {
@@ -881,20 +889,29 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
     PINBackgroundTask *task = [PINBackgroundTask start];
     
     [self lock];
-        if (self->_willRemoveAllObjectsBlock)
-            self->_willRemoveAllObjectsBlock(self);
-        
+        PINDiskCacheBlock willRemoveAllObjectsBlock = self->_willRemoveAllObjectsBlock;
+        if (willRemoveAllObjectsBlock) {
+            [self unlock];
+            willRemoveAllObjectsBlock(self);
+            [self lock];
+        }
+    
         [PINDiskCache moveItemAtURLToTrash:self->_cacheURL];
         [PINDiskCache emptyTrash];
         
-        [self createCacheDirectory];
+        [self _locked_createCacheDirectory];
         
         [self->_dates removeAllObjects];
         [self->_sizes removeAllObjects];
         self.byteCount = 0; // atomic
-        
-        if (self->_didRemoveAllObjectsBlock)
-            self->_didRemoveAllObjectsBlock(self);
+    
+        PINDiskCacheBlock didRemoveAllObjectsBlock = self->_didRemoveAllObjectsBlock;
+        if (didRemoveAllObjectsBlock) {
+            [self unlock];
+            didRemoveAllObjectsBlock(self);
+            [self lock];
+        }
+    
     [self unlock];
     
     [task end];
