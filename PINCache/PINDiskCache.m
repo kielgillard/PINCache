@@ -141,7 +141,7 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
 
 #pragma mark - Private Methods -
 
-- (NSURL *)encodedFileURLForKey:(NSString *)key
+- (NSURL *)_locked_encodedFileURLForKey:(NSString *)key
 {
     if (![key length])
         return nil;
@@ -349,77 +349,112 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
 
 - (BOOL)removeFileAndExecuteBlocksForKey:(NSString *)key
 {
-    NSURL *fileURL = [self encodedFileURLForKey:key];
-    if (!fileURL || ![[NSFileManager defaultManager] fileExistsAtPath:[fileURL path]])
-        return NO;
+    [self lock];
+        NSURL *fileURL = [self _locked_encodedFileURLForKey:key];
     
-    if (_willRemoveObjectBlock)
-        _willRemoveObjectBlock(self, key, nil);
+        if (!fileURL || ![[NSFileManager defaultManager] fileExistsAtPath:[fileURL path]]) {
+            [self unlock];
+            return NO;
+        }
     
-    BOOL trashed = [PINDiskCache moveItemAtURLToTrash:fileURL];
-    if (!trashed)
-        return NO;
+        PINDiskCacheObjectBlock willRemoveObjectBlock = _willRemoveObjectBlock;
+        if (willRemoveObjectBlock) {
+            [self unlock];
+            willRemoveObjectBlock(self, key, nil);
+            [self lock];
+        }
+        
+        BOOL trashed = [PINDiskCache moveItemAtURLToTrash:fileURL];
+        if (!trashed) {
+            [self unlock];
+            return NO;
+        }
     
-    [PINDiskCache emptyTrash];
+        [PINDiskCache emptyTrash];
+        
+        NSNumber *byteSize = [_sizes objectForKey:key];
+        if (byteSize)
+            self.byteCount = _byteCount - [byteSize unsignedIntegerValue]; // atomic
+        
+        [_sizes removeObjectForKey:key];
+        [_dates removeObjectForKey:key];
     
-    NSNumber *byteSize = [_sizes objectForKey:key];
-    if (byteSize)
-        self.byteCount = _byteCount - [byteSize unsignedIntegerValue]; // atomic
+        PINDiskCacheObjectBlock didRemoveObjectBlock = _didRemoveObjectBlock;
+        if (didRemoveObjectBlock) {
+            [self unlock];
+            _didRemoveObjectBlock(self, key, nil);
+            [self lock];
+        }
     
-    [_sizes removeObjectForKey:key];
-    [_dates removeObjectForKey:key];
-    
-    if (_didRemoveObjectBlock)
-        _didRemoveObjectBlock(self, key, nil);
+    [self unlock];
     
     return YES;
 }
 
 - (void)trimDiskToSize:(NSUInteger)trimByteCount
 {
-    if (_byteCount <= trimByteCount)
-        return;
-    
-    NSArray *keysSortedBySize = [_sizes keysSortedByValueUsingSelector:@selector(compare:)];
-    
-    for (NSString *key in [keysSortedBySize reverseObjectEnumerator]) { // largest objects first
-        [self removeFileAndExecuteBlocksForKey:key];
-        
-        if (_byteCount <= trimByteCount)
-            break;
-    }
+    [self lock];
+        if (_byteCount > trimByteCount) {
+            NSArray *keysSortedBySize = [_sizes keysSortedByValueUsingSelector:@selector(compare:)];
+            
+            for (NSString *key in [keysSortedBySize reverseObjectEnumerator]) { // largest objects first
+                [self unlock];
+                
+                //unlock, removeFileAndExecuteBlocksForKey handles locking itself
+                [self removeFileAndExecuteBlocksForKey:key];
+                
+                [self lock];
+                
+                if (_byteCount <= trimByteCount)
+                    break;
+            }
+        }
+    [self unlock];
 }
 
 - (void)trimDiskToSizeByDate:(NSUInteger)trimByteCount
 {
-    if (_byteCount <= trimByteCount)
-        return;
-    
-    NSArray *keysSortedByDate = [_dates keysSortedByValueUsingSelector:@selector(compare:)];
-    
-    for (NSString *key in keysSortedByDate) { // oldest objects first
-        [self removeFileAndExecuteBlocksForKey:key];
-        
-        if (_byteCount <= trimByteCount)
-            break;
-    }
+    [self lock];
+        if (_byteCount > trimByteCount) {
+            NSArray *keysSortedByDate = [_dates keysSortedByValueUsingSelector:@selector(compare:)];
+            
+            for (NSString *key in keysSortedByDate) { // oldest objects first
+                [self unlock];
+                
+                //unlock, removeFileAndExecuteBlocksForKey handles locking itself
+                [self removeFileAndExecuteBlocksForKey:key];
+                
+                [self lock];
+                
+                if (_byteCount <= trimByteCount)
+                    break;
+            }
+        }
+    [self unlock];
 }
 
 - (void)trimDiskToDate:(NSDate *)trimDate
 {
-    NSArray *keysSortedByDate = [_dates keysSortedByValueUsingSelector:@selector(compare:)];
-    
-    for (NSString *key in keysSortedByDate) { // oldest files first
-        NSDate *accessDate = [_dates objectForKey:key];
-        if (!accessDate)
-            continue;
+    [self lock];
+        NSArray *keysSortedByDate = [_dates keysSortedByValueUsingSelector:@selector(compare:)];
         
-        if ([accessDate compare:trimDate] == NSOrderedAscending) { // older than trim date
-            [self removeFileAndExecuteBlocksForKey:key];
-        } else {
-            break;
+        for (NSString *key in keysSortedByDate) { // oldest files first
+            NSDate *accessDate = [_dates objectForKey:key];
+            if (!accessDate)
+                continue;
+            
+            if ([accessDate compare:trimDate] == NSOrderedAscending) { // older than trim date
+                [self unlock];
+                
+                //unlock, removeFileAndExecuteBlocksForKey handles locking itself
+                [self removeFileAndExecuteBlocksForKey:key];
+                
+                [self lock];
+            } else {
+                break;
+            }
         }
-    }
+    [self unlock];
 }
 
 - (void)trimToAgeLimitRecursively
@@ -430,10 +465,8 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
     if (ageLimit == 0.0)
         return;
     
-    [self lock];
-        NSDate *date = [[NSDate alloc] initWithTimeIntervalSinceNow:-ageLimit];
-        [self trimDiskToDate:date];
-    [self unlock];
+    NSDate *date = [[NSDate alloc] initWithTimeIntervalSinceNow:-ageLimit];
+    [self trimDiskToDate:date];
     
     __weak PINDiskCache *weakSelf = self;
     
@@ -641,7 +674,7 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
     NSURL *fileURL = nil;
     
     [self lock];
-        fileURL = [self encodedFileURLForKey:key];
+        fileURL = [self _locked_encodedFileURLForKey:key];
         object = nil;
         
         if ([[NSFileManager defaultManager] fileExistsAtPath:[fileURL path]] &&
@@ -685,7 +718,7 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
     NSURL *fileURL = nil;
     
     [self lock];
-        fileURL = [self encodedFileURLForKey:key];
+        fileURL = [self _locked_encodedFileURLForKey:key];
         
         if ([[NSFileManager defaultManager] fileExistsAtPath:[fileURL path]]) {
             if (updateFileModificationDate) {
@@ -726,7 +759,7 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
     NSURL *fileURL = nil;
     
     [self lock];
-        fileURL = [self encodedFileURLForKey:key];
+        fileURL = [self _locked_encodedFileURLForKey:key];
         
         if (self->_willAddObjectBlock)
             self->_willAddObjectBlock(self, key, object);
@@ -786,9 +819,10 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
     NSURL *fileURL = nil;
     
     [self lock];
-        fileURL = [self encodedFileURLForKey:key];
-        [self removeFileAndExecuteBlocksForKey:key];
+        fileURL = [self _locked_encodedFileURLForKey:key];
     [self unlock];
+    
+    [self removeFileAndExecuteBlocksForKey:key];
     
     [task end];
     
@@ -806,9 +840,7 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
     
     PINBackgroundTask *task = [PINBackgroundTask start];
     
-    [self lock];
-        [self trimDiskToSize:trimByteCount];
-    [self unlock];
+    [self trimDiskToSize:trimByteCount];
     
     [task end];
 }
@@ -825,9 +857,7 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
     
     PINBackgroundTask *task = [PINBackgroundTask start];
     
-    [self lock];
-        [self trimDiskToDate:trimDate];
-    [self unlock];
+    [self trimDiskToDate:trimDate];
     
     [task end];
 }
@@ -841,9 +871,7 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
     
     PINBackgroundTask *task = [PINBackgroundTask start];
     
-    [self lock];
-        [self trimDiskToSizeByDate:trimByteCount];
-    [self unlock];
+    [self trimDiskToSizeByDate:trimByteCount];
     
     [task end];
 }
@@ -884,7 +912,7 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
         NSArray *keysSortedByDate = [self->_dates keysSortedByValueUsingSelector:@selector(compare:)];
         
         for (NSString *key in keysSortedByDate) {
-            NSURL *fileURL = [self encodedFileURLForKey:key];
+            NSURL *fileURL = [self _locked_encodedFileURLForKey:key];
             // If the cache should behave like a TTL cache, then only fetch the object if there's a valid ageLimit and  the object is still alive
             if (!self->_ttlCache || self->_ageLimit <= 0 || fabs([[_dates objectForKey:key] timeIntervalSinceDate:now]) < self->_ageLimit) {
                 block(key, fileURL);
@@ -1073,11 +1101,11 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
             return;
         
         [strongSelf lock];
-        strongSelf->_byteLimit = byteLimit;
+            strongSelf->_byteLimit = byteLimit;
+        [strongSelf unlock];
         
         if (byteLimit > 0)
             [strongSelf trimDiskToSizeByDate:byteLimit];
-        [strongSelf unlock];
     });
 }
 
