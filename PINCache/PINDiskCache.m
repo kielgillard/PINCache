@@ -354,7 +354,7 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
         return NO;
     
     if (_willRemoveObjectBlock)
-        _willRemoveObjectBlock(self, key, nil, fileURL);
+        _willRemoveObjectBlock(self, key, nil);
     
     BOOL trashed = [PINDiskCache moveItemAtURLToTrash:fileURL];
     if (!trashed)
@@ -370,7 +370,7 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
     [_dates removeObjectForKey:key];
     
     if (_didRemoveObjectBlock)
-        _didRemoveObjectBlock(self, key, nil, fileURL);
+        _didRemoveObjectBlock(self, key, nil);
     
     return YES;
 }
@@ -483,14 +483,12 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
         id <NSCoding> object = [strongSelf objectForKey:key fileURL:&fileURL];
         
         if (block) {
-            [strongSelf lock];
-                block(strongSelf, key, object, fileURL);
-            [strongSelf unlock];
+            block(strongSelf, key, object);
         }
     });
 }
 
-- (void)fileURLForKey:(NSString *)key block:(PINDiskCacheObjectBlock)block
+- (void)fileURLForKey:(NSString *)key block:(PINDiskCacheFileURLBlock)block
 {
     __weak PINDiskCache *weakSelf = self;
     
@@ -500,7 +498,7 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
         
         if (block) {
             [strongSelf lock];
-                block(strongSelf, key, nil, fileURL);
+                block(key, fileURL);
             [strongSelf unlock];
         }
     });
@@ -516,9 +514,7 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
         [strongSelf setObject:object forKey:key fileURL:&fileURL];
         
         if (block) {
-            [strongSelf lock];
-                block(strongSelf, key, object, fileURL);
-            [strongSelf unlock];
+            block(strongSelf, key, object);
         }
     });
 }
@@ -533,9 +529,7 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
         [strongSelf removeObjectForKey:key fileURL:&fileURL];
         
         if (block) {
-            [strongSelf lock];
-                block(strongSelf, key, nil, fileURL);
-            [strongSelf unlock];
+            block(strongSelf, key, nil);
         }
     });
 }
@@ -549,9 +543,7 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
         [strongSelf trimToSize:trimByteCount];
         
         if (block) {
-            [strongSelf lock];
-                block(strongSelf);
-            [strongSelf unlock];
+            block(strongSelf);
         }
     });
 }
@@ -565,9 +557,7 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
         [strongSelf trimToDate:trimDate];
         
         if (block) {
-            [strongSelf lock];
-                block(strongSelf);
-            [strongSelf unlock];
+            block(strongSelf);
         }
     });
 }
@@ -581,9 +571,7 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
         [strongSelf trimToSizeByDate:trimByteCount];
         
         if (block) {
-            [strongSelf lock];
-                block(strongSelf);
-            [strongSelf unlock];
+            block(strongSelf);
         }
     });
 }
@@ -597,14 +585,12 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
         [strongSelf removeAllObjects];
         
         if (block) {
-            [strongSelf lock];
-                block(strongSelf);
-            [strongSelf unlock];
+            block(strongSelf);
         }
     });
 }
 
-- (void)enumerateObjectsWithBlock:(PINDiskCacheObjectBlock)block completionBlock:(PINDiskCacheBlock)completionBlock
+- (void)enumerateObjectsWithBlock:(PINDiskCacheFileURLBlock)block completionBlock:(PINDiskCacheBlock)completionBlock
 {
     __weak PINDiskCache *weakSelf = self;
     
@@ -613,9 +599,7 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
         [strongSelf enumerateObjectsWithBlock:block];
         
         if (completionBlock) {
-            [self lock];
-                completionBlock(strongSelf);
-            [self unlock];
+            completionBlock(strongSelf);
         }
     });
 }
@@ -626,7 +610,7 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
 {
     if (block) {
         [self lock];
-        block(self);
+            block(self);
         [self unlock];
     }
 }
@@ -745,7 +729,7 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
         fileURL = [self encodedFileURLForKey:key];
         
         if (self->_willAddObjectBlock)
-            self->_willAddObjectBlock(self, key, object, fileURL);
+            self->_willAddObjectBlock(self, key, object);
   
         NSData *data = [NSKeyedArchiver archivedDataWithRootObject:object];
         NSError *writeError = nil;
@@ -777,7 +761,7 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
         }
         
         if (self->_didAddObjectBlock)
-            self->_didAddObjectBlock(self, key, object, written ? fileURL : nil);
+            self->_didAddObjectBlock(self, key, object);
     [self unlock];
     
     if (outFileURL) {
@@ -888,7 +872,7 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
     [task end];
 }
 
-- (void)enumerateObjectsWithBlock:(PINDiskCacheObjectBlock)block
+- (void)enumerateObjectsWithBlock:(PINDiskCacheFileURLBlock)block
 {
     if (!block)
         return;
@@ -903,7 +887,7 @@ static NSString * const PINDiskCacheSharedName = @"PINDiskCacheShared";
             NSURL *fileURL = [self encodedFileURLForKey:key];
             // If the cache should behave like a TTL cache, then only fetch the object if there's a valid ageLimit and  the object is still alive
             if (!self->_ttlCache || self->_ageLimit <= 0 || fabs([[_dates objectForKey:key] timeIntervalSinceDate:now]) < self->_ageLimit) {
-                block(self, key, nil, fileURL);
+                block(key, fileURL);
             }
         }
     [self unlock];
